@@ -1,0 +1,10 @@
+# 更精确的实际收益率计算（考虑买卖价差）
+df['actual_ret'] = np.where(
+    df['pred'] == 2,  # 买入信号
+    (df['future_mid'] - df['ask_price']) / df['ask_price'],
+    np.where(
+        df['pred'] == 0,  # 卖出信号
+        (df['bid_price'] - df['future_mid']) / df['bid_price'],
+        0  # 持有信号收益为0
+    )
+)
