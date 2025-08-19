@@ -32,3 +32,84 @@ test_df.set_index('timestamp', inplace=True)
 
 prices = compute_prices(test_df, preds)
 prices
+
+
+
+
+import pandas as pd
+import numpy as np
+from scipy.stats import spearmanr, pearsonr
+
+def calculate_ic_rankic(prices_df):
+    """
+    计算IC和RankIC
+    要求输入DataFrame包含：
+    - pred_buy: 买入预测概率
+    - pred_sell: 卖出预测概率  
+    - future_price: 未来价格
+    - current_price: 当前价格
+    """
+    # 计算实际收益率（考虑买卖价差）
+    prices_df['actual_ret'] = (
+        prices_df['ask_price_future'] / prices_df['bid_price'] - 1  # 假设以bid价卖出，ask价买回
+    )
+    df['actual_ret'] = df['actual_ret'] - 0.0005  # 单边手续费0.05%
+    # 计算预测信号（买概率 - 卖概率）
+    prices_df['pred_signal'] = prices_df['pred_buy'] - prices_df['pred_sell']
+    
+    # IC计算（Pearson）
+    ic = pearsonr(prices_df['pred_signal'], prices_df['actual_ret'])[0]
+    
+    # RankIC计算（Spearman）
+    rankic = spearmanr(prices_df['pred_signal'], prices_df['actual_ret']).correlation
+    
+    return ic, rankic
+
+def enhanced_compute_prices(test_df, preds, latency=pd.Timedelta(milliseconds=50)):
+    """
+    优化后的价格计算函数
+    返回包含预测概率和未来价格的数据
+    """
+    # 确保preds是概率矩阵
+    assert preds.shape[1] == 3, "preds应为3列矩阵[卖, 持有, 买概率]"
+    
+    # 合并预测概率
+    pred_df = pd.DataFrame(
+        preds, 
+        columns=['pred_sell', 'pred_hold', 'pred_buy'],
+        index=test_df.index
+    )
+    merged = pd.concat([test_df, pred_df], axis=1)
+    
+    # 获取未来价格（考虑延迟）
+    future_prices = merged[['bid_price', 'ask_price']].copy()
+    future_prices.index = future_prices.index + latency
+    
+    # 合并未来数据
+    result = pd.merge_asof(
+        merged.sort_index(),
+        future_prices.sort_index(),
+        left_index=True,
+        right_index=True,
+        suffixes=('', '_future'),
+        direction='forward'  # 取未来最近的价格
+    )
+    
+    return result.dropna()
+
+# 使用示例
+test_df = pd.read_csv(file_paths[-1], 
+                     usecols=['timestamp', 'bid_price', 'ask_price'],
+                     engine='pyarrow')
+test_df['timestamp'] = pd.to_datetime(test_df['timestamp'], unit='us')
+test_df.set_index('timestamp', inplace=True)
+
+# 假设preds是模型输出的概率矩阵
+preds = np.random.dirichlet([1,1,1], size=len(test_df))  # 模拟预测概率
+
+# 生成增强数据
+prices_df = enhanced_compute_prices(test_df, preds)
+
+# 计算IC和RankIC
+ic, rankic = calculate_ic_rankic(prices_df)
+print(f"IC: {ic:.4f}, RankIC: {rankic:.4f}")
