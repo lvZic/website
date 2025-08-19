@@ -113,3 +113,21 @@ prices_df = enhanced_compute_prices(test_df, preds)
 # 计算IC和RankIC
 ic, rankic = calculate_ic_rankic(prices_df)
 print(f"IC: {ic:.4f}, RankIC: {rankic:.4f}")
+
+
+
+
+def action_specific_ic(df):
+    """按动作类型计算IC"""
+    results = {}
+    for action, col in [('Sell', 'pred_sell'), ('Buy', 'pred_buy')]:
+        subset = df[df[col] > 0.5]  # 取高置信度样本
+        if len(subset) > 10:
+            ic = pearsonr(subset[col], subset['actual_ret'])[0]
+            rankic = spearmanr(subset[col], subset['actual_ret']).correlation
+            results[action] = (ic, rankic)
+    return results
+
+action_ics = action_specific_ic(prices_df)
+for action, (ic, rankic) in action_ics.items():
+    print(f"{action}信号 IC: {ic:.4f}, RankIC: {rankic:.4f}")
