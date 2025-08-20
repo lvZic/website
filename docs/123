@@ -131,3 +131,114 @@ def action_specific_ic(df):
 action_ics = action_specific_ic(prices_df)
 for action, (ic, rankic) in action_ics.items():
     print(f"{action}信号 IC: {ic:.4f}, RankIC: {rankic:.4f}")
+
+
+
+
+
+import numpy as np
+import pandas as pd
+from scipy.stats import pearsonr, spearmanr
+
+def calculate_performance_metrics(y_true, y_pred):
+    """
+    计算预测收益率与实际收益率的IC和RankIC
+    
+    参数:
+        y_true: 实际收益率数组
+        y_pred: 预测收益率数组
+        
+    返回:
+        dict: 包含各项评估指标
+    """
+    # 确保输入为numpy数组并去除NaN
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    
+    if len(y_true) == 0:
+        raise ValueError("去除NaN后没有有效数据")
+    
+    # 计算IC（Pearson相关系数）
+    ic, ic_pvalue = pearsonr(y_pred, y_true)
+    
+    # 计算RankIC（Spearman相关系数）
+    rankic, rankic_pvalue = spearmanr(y_pred, y_true)
+    
+    # 计算IR（信息比率）
+    ir = ic / np.std(y_pred)
+    
+    # 计算预测方向准确性
+    direction_accuracy = np.mean(np.sign(y_pred) == np.sign(y_true))
+    
+    return {
+        'IC': ic,
+        'IC_pvalue': ic_pvalue,
+        'RankIC': rankic,
+        'RankIC_pvalue': rankic_pvalue,
+        'IR': ir,
+        'Direction_Accuracy': direction_accuracy,
+        'N': len(y_true)
+    }
+
+def evaluate_on_test_set(test_df, model, feature_columns, target_column='future_ret'):
+    """
+    在测试集上评估模型预测收益率的性能
+    
+    参数:
+        test_df: 测试集DataFrame
+        model: 训练好的回归模型
+        feature_columns: 特征列名列表
+        target_column: 目标收益率列名
+        
+    返回:
+        dict: 包含各项评估指标
+    """
+    # 准备测试数据
+    X_test = test_df[feature_columns]
+    y_test = test_df[target_column]
+    
+    # 预测收益率
+    y_pred = model.predict(X_test)
+    
+    # 计算评估指标
+    metrics = calculate_performance_metrics(y_test, y_pred)
+    
+    return metrics
+
+# 示例使用方式
+if __name__ == "__main__":
+    # 假设已有测试数据和训练好的模型
+    from sklearn.ensemble import RandomForestRegressor
+    
+    # 模拟数据
+    np.random.seed(42)
+    test_data = pd.DataFrame({
+        'feature1': np.random.normal(0, 1, 1000),
+        'feature2': np.random.normal(0, 1, 1000),
+        'future_ret': np.random.normal(0, 0.01, 1000)
+    })
+    
+    # 添加一些相关性（模拟预测能力）
+    test_data['future_ret'] += 0.005 * test_data['feature1']
+    
+    # 训练简单模型
+    model = RandomForestRegressor()
+    model.fit(test_data[['feature1', 'feature2']], test_data['future_ret'])
+    
+    # 评估
+    metrics = evaluate_on_test_set(
+        test_df=test_data,
+        model=model,
+        feature_columns=['feature1', 'feature2']
+    )
+    
+    # 打印结果
+    print("测试集表现评估:")
+    print(f"IC: {metrics['IC']:.4f} (p={metrics['IC_pvalue']:.3f})")
+    print(f"RankIC: {metrics['RankIC']:.4f} (p={metrics['RankIC_pvalue']:.3f})")
+    print(f"信息比率(IR): {metrics['IR']:.4f}")
+    print(f"方向准确性: {metrics['Direction_Accuracy']:.2%}")
+    print(f"有效样本数: {metrics['N']}")
