@@ -242,3 +242,53 @@ if __name__ == "__main__":
     print(f"信息比率(IR): {metrics['IR']:.4f}")
     print(f"方向准确性: {metrics['Direction_Accuracy']:.2%}")
     print(f"有效样本数: {metrics['N']}")
+
+
+
+def calculate_trading_signals(temp_df, gamma, window_ms=20, freq='1ms'):
+    """
+    计算买卖信号，基于过去20ms的窗口
+    
+    参数:
+        temp_df: 包含价格数据的DataFrame
+        gamma: 交易信号阈值
+        window_ms: 窗口大小(毫秒)
+        freq: 数据频率(用于计算窗口大小)
+        
+    返回:
+        buy_index: 买入信号索引
+        sell_index: 卖出信号索引
+    """
+    # 计算每个时间点过去20ms的窗口大小（数据点数量）
+    window_size = int(window_ms / pd.Timedelta(freq).total_seconds() * 1000)
+    
+    # 计算过去20ms的平均卖价（ask_price）
+    avg_ask = temp_df['ask_price'].rolling(window=window_size, min_periods=1).mean()
+    
+    # 计算过去20ms的平均买价（bid_price）
+    avg_bid = temp_df['bid_price'].rolling(window=window_size, min_periods=1).mean()
+    
+    # 买入信号：(过去20ms平均卖价 - 当前卖价) / 当前卖价 > gamma
+    buy_signal = ((avg_ask.shift(1) - temp_df['ask_price']) / temp_df['ask_price']) > gamma
+    
+    # 卖出信号：(当前买价 - 过去20ms平均买价) / 当前买价 > gamma
+    sell_signal = ((temp_df['bid_price'] - avg_bid.shift(1)) / temp_df['bid_price']) > gamma
+    
+    # 获取信号索引
+    buy_index = pd.Series(temp_df[buy_signal].index)
+    sell_index = pd.Series(temp_df[sell_signal].index)
+    
+    return buy_index, sell_index
+
+# 使用示例
+temp_df = pd.DataFrame({
+    'bid_price': [100, 101, 102, 103, 104, 105],
+    'ask_price': [101, 102, 103, 104, 105, 106],
+    'timestamp': pd.date_range(start='2023-01-01', periods=6, freq='10ms')
+}).set_index('timestamp')
+
+buy_idx, sell_idx = calculate_trading_signals(temp_df, gamma=0.01, window_ms=20, freq='10ms')
+print("买入信号索引:", buy_idx.values)
+print("卖出信号索引:", sell_idx.values)
+
+
