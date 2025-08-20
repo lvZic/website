@@ -330,3 +330,68 @@ print("卖出信号索引:", sell_idx.values)
 
 
 
+
+def calculate_trading_signals(temp_df, gamma, window_ms=20, T=10):
+    """
+    计算买卖信号并创建时间窗口（兼容时间戳索引）
+    
+    参数:
+        temp_df: 包含价格数据的DataFrame（时间戳索引）
+        gamma: 交易信号阈值
+        window_ms: 滚动窗口大小(毫秒)
+        T: 时间窗口长度（单位：数据点）
+        
+    返回:
+        dict: 包含买卖窗口和标签
+    """
+    # 1. 计算买卖信号（返回时间戳索引）
+    temp_buy_index = pd.Series(temp_df[
+        ((temp_df['bid_price'].rolling(f'{window_ms}ms').mean().shift(1) - temp_df['ask_price']) / temp_df['ask_price']) > gamma
+    ].index)
+    
+    temp_sell_index = pd.Series(temp_df[
+        ((temp_df['bid_price'] - temp_df['ask_price'].rolling(f'{window_ms}ms').mean().shift(1)) / temp_df['bid_price']) > gamma
+    ].index)
+
+    # 2. 创建时间窗口（处理时间戳）
+    def create_time_windows(timestamps, T):
+        """为时间戳创建前T个点的窗口"""
+        windows = []
+        for ts in timestamps:
+            # 找到当前时间戳在索引中的位置
+            pos = temp_df.index.get_loc(ts)
+            if pos >= T-1:  # 确保有足够的历史数据
+                window_indices = range(pos-T+1, pos+1)
+                windows.append(temp_df.iloc[window_indices].index.values)
+        return np.array(windows)
+    
+    # 创建买卖窗口
+    temp_buy_windows = create_time_windows(temp_buy_index, T)
+    temp_sell_windows = create_time_windows(temp_sell_index, T)
+    
+    # 3. 平衡样本数量
+    N = min(len(temp_buy_windows), len(temp_sell_windows))
+    if N == 0:
+        raise ValueError("没有足够的买卖信号生成窗口")
+    
+    # 随机选择N个买卖窗口
+    selected_buy = temp_buy_windows[np.random.choice(len(temp_buy_windows), N, replace=False)]
+    selected_sell = temp_sell_windows[np.random.choice(len(temp_sell_windows), N, replace=False)]
+    
+    # 创建持有窗口
+    valid_indices = temp_df.index.difference(temp_buy_index).difference(temp_sell_index)
+    hold_indices = np.random.choice(valid_indices, N, replace=False)
+    temp_hold_windows = create_time_windows(hold_indices, T)
+
+    # 4. 合并数据
+    windows = np.concatenate([selected_buy, selected_sell, temp_hold_windows])
+    labels = np.array([1]*N + [0]*N + [2]*N)  # 1:买, 0:卖, 2:持有
+    
+    return {
+        'windows': windows,  # 三维数组 (3N, T)
+        'timestamps': windows[:, -1],  # 每个窗口的结束时间
+        'labels': labels
+    }
+
+
+
