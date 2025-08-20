@@ -292,3 +292,41 @@ print("买入信号索引:", buy_idx.values)
 print("卖出信号索引:", sell_idx.values)
 
 
+
+  temp_buy_index = pd.Series(temp_df[((temp_df['bid_price'].iloc[::-1].rolling('20ms').mean()).shift(1).iloc[::-1] - temp_df['ask_price']) / temp_df['ask_price'] > gamma].index)
+  temp_sell_index = pd.Series(temp_df[(temp_df['bid_price'] - (temp_df['ask_price'].iloc[::-1].rolling('20ms').mean()).shift(1).iloc[::-1]  ) / temp_df['bid_price'] > gamma].index)
+
+  ## create window
+  temp_buy_points = temp_buy_index[temp_buy_index.diff(-1) != -1]
+  temp_sell_points = temp_sell_index[temp_sell_index.diff(-1) != -1]
+
+  temp_buy_windows = np.stack([temp_buy_points - t for t in range(T)]).T[:, ::-1]
+  temp_sell_windows = np.stack([temp_sell_points - t for t in range(T)]).T[:, ::-1]
+
+  ## 平衡样本数量
+  temp_N = min(len(temp_buy_windows), len(temp_sell_windows))
+  temp_hold_index = np.random.choice(temp_df.index.difference(temp_buy_index).difference(temp_sell_index), size=temp_N)
+  temp_hold_windows = np.stack([temp_hold_index - t for t in range(T)]).T[:, ::-1]
+
+
+
+
+  def get_features_and_labels(windows):
+    features=temp_df.values[:, 2:][windows]
+    labels=temp_df['future_ret'].iloc[windows[:,-1]].values
+    return features, labels
+  
+  buy_features, buy_labels=get_features_and_labels(temp_buy_windows[np.random.choice(temp_buy_windows.shape[0], temp_N, replace=False)])
+  sell_features, sell_labels=get_features_and_labels(temp_sell_windows[np.random.choice(temp_sell_windows.shape[0], temp_N, replace=False)])
+  hold_features, hold_labels=get_features_and_labels(temp_hold_windows)
+
+  features = np.concatenate((buy_features, sell_features, hold_features),axis=0)
+  labels = np.concatenate([buy_labels, sell_labels, hold_labels])
+
+
+  print(buy_labels.shape[0], 'buys')
+  print(hold_labels.shape[0], 'holds')
+  print(sell_labels.shape[0], 'sells', end='\n\n')
+
+
+
