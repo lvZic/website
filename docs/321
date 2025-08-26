@@ -1,0 +1,469 @@
+
+from tardis_dev import datasets
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+import nest_asyncio
+nest_asyncio.apply()
+
+import pandas as pd
+import numpy as np
+from scipy.stats import spearmanr, pearsonr
+import scipy.stats as stats  
+
+from glob import glob
+
+file_paths = sorted(glob("datasets/*.csv.gz"))
+bbo_path=['/home/vic/proj/exploring-order-book-predictability-main/datasets/binance-futures_book_ticker_2025-06-07_BTCUSDT.csv.gz']
+agg_path=['/home/vic/proj/exploring-order-book-predictability-main/agg_trade_june/BTCUSDT-aggTrades-2025-06-07.csv']
+pd.set_option('display.max_columns', 100)
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import pandas as pd
+from tqdm import tqdm
+import numpy as np
+from torch.utils.data import Dataset, DataLoader
+
+torch.autograd.set_detect_anomaly(True)
+
+class CNN(nn.Module):
+    def __init__(self, feature_dim):
+        super(CNN, self).__init__()
+  
+        # Fully connected layers for classification
+        self.fc1 = nn.Linear(feature_dim , 32)  # Fully connected layer
+        self.fc2 = nn.Linear(32, 1)       # Output layer
+
+        self.bn1 = nn.BatchNorm1d(32) 
+        self.bn2 = nn.BatchNorm1d(64) 
+        self.layer = nn.Sequential(
+          nn.Linear(feature_dim , 32),
+          nn.LayerNorm(32),
+          # nn.BatchNorm1d(32) 
+          nn.LeakyReLU(0.01)
+        )
+
+    def forward(self, x):
+        # Reshape the input to fit Conv1d: [batch, channels, sequence]
+        # Fully connected layers with activation
+        x = self.layer(x)
+        x = self.fc2(x)  # No activation, as it will be used in Cross entropy loss
+
+        return x
+
+class LightweightGRU(nn.Module):
+    def __init__(self, input_size=30, hidden_size=64):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=2,
+            batch_first=True,
+            dropout=0.1
+        )
+        self.fc = nn.Linear(hidden_size, 1)
+        # self.scale_factor = nn.Parameter(torch.tensor(10000.0)) 
+        
+    def forward(self, x):
+        x = x.unsqueeze(1)
+        # x shape: [batch_size, seq_len=1, input_size]
+        _, h_n = self.gru(x)  # h_n shape: [num_layers, batch_size, hidden_size]
+        last_hidden = h_n[-1]  # 取最后一层的隐藏状态
+        return self.fc(last_hidden) * 1000.
+
+
+def calculate_advanced_factors(df, window='100ms'):
+    """计算冷门但可能有效的高频因子"""
+    print("Calculating advanced high-frequency factors...")
+
+    df.set_index('transact_time', inplace=True)
+    df['trade_count'] =  df['price'].rolling(window).count()
+    df['total_volume'] =  df['quantity'].rolling(window).sum()
+    df['buy_ratio'] =  df['is_buy'].rolling(window).sum()
+    df['price_std'] =  df['price'].rolling(window).std()
+    df['avg_trade_size'] =  df['quantity'].rolling(window).mean()
+
+    # return df.replace([np.inf, -np.inf], np.nan).dropna()
+
+    # 1. 价格跳跃因子 (Price Jump Factors)
+    price_changes = df['price'].diff()
+    price_change_std = price_changes.rolling(window).std()
+    df['price_jump'] = np.abs(price_changes) / price_change_std
+    df['large_jump_count'] = (df['price_jump'] > 2).rolling(window).sum()
+    df['jump_intensity'] = df['price_jump'].rolling(window).mean()
+    
+    # 2. 订单大小分布因子 (Order Size Distribution)
+    # quantity_rolling = df['quantity'].rolling(window)
+    # df['quantity_skew'] = quantity_rolling.apply(lambda x: stats.skew(x.dropna()) if len(x.dropna()) > 3 else 0)
+    # df['quantity_kurt'] = quantity_rolling.apply(lambda x: stats.kurtosis(x.dropna()) if len(x.dropna()) > 3 else 0)
+    # df['large_order_ratio'] = (df['quantity'] > df['quantity'].rolling(window).quantile(0.8)).rolling(window).mean()
+    
+    # 3. 时间间隔因子 (Time Interval Factors)
+    df['avg_time_interval'] = df['time_interval'].rolling(window).mean()
+    df['time_acceleration'] = df['time_interval'].rolling(window).std() / df['avg_time_interval']
+    df['trading_intensity'] = 1 / (df['avg_time_interval'] + 1e-6)  # 避免除零
+
+
+    
+    # 4. 价格反转因子 (Price Reversal Factors)
+    # df['price_reversal_1'] = -df['price'].pct_change(1) * df['price'].pct_change(2)
+    # df['price_reversal_strength'] = df['price_reversal_1'].rolling(window).mean()
+    # df['reversal_frequency'] = (df['price_reversal_1'] > 0).rolling(window).mean()
+    
+    # 5. 微观结构噪声因子 (Microstructure Noise)
+    # df['bid_ask_bounce'] = np.abs(df['price'].diff()) / df['price'].shift(1)
+    # df['noise_ratio'] = df['bid_ask_bounce'].rolling(window).mean()
+    # df['price_efficiency'] = 1 / (df['noise_ratio'] + 1e-6)
+    
+    # 6. 波动率聚类因子 (Volatility Clustering)
+    returns = df['price'].pct_change()
+    abs_returns = np.abs(returns)
+    df['volatility_cluster'] = abs_returns.rolling(window).corr(abs_returns.shift(1))
+    df['volatility_persistence'] = abs_returns.rolling(window).apply(
+        lambda x: np.corrcoef(x[:-1], x[1:])[0,1] if len(x) > 2 else 0
+    )
+
+    # 7. 流动性因子 (Liquidity Factors)
+    df['turnover_rate'] = df['quantity'] * df['price']
+    df['liquidity_proxy'] = df['turnover_rate'] / (np.abs(df['price'].pct_change()) + 1e-6)
+    df['illiquidity'] = np.abs(df['price'].pct_change()) / (df['turnover_rate'] + 1e-6)
+
+
+    
+    # 8. 订单流不对称性 (Order Flow Asymmetry)
+    buy_size_rolling = (df['quantity'] * df['is_buy']).rolling(window)
+    sell_size_rolling = (df['quantity'] * df['is_sell']).rolling(window)
+    
+    df['buy_size_mean'] = buy_size_rolling.mean()
+    df['sell_size_mean'] = sell_size_rolling.mean()
+    df['size_asymmetry'] = (df['buy_size_mean'] - df['sell_size_mean']) / (df['buy_size_mean'] + df['sell_size_mean'] + 1e-6)
+
+    # 9. 价格聚类因子 (Price Clustering)
+    # 检测价格是否在整数位或半整数位聚集
+    price_decimal = (df['price'] * 10) % 10  # 取小数点后一位
+    df['price_clustering'] = ((price_decimal == 0) | (price_decimal == 5)).astype(int)
+    df['clustering_ratio'] = df['price_clustering'].rolling(window).mean()
+    
+    # 10. 交易频率异常因子 (Trading Frequency Anomaly)
+    df['trade_count'] = 1
+    df['trade_frequency'] = df['trade_count'].rolling(window).sum()
+    df['frequency_deviation'] = (df['trade_frequency'] - df['trade_frequency'].rolling(window*3).mean()) / df['trade_frequency'].rolling(window*3).std()
+
+    # 11. 价格动量衰减因子 (Momentum Decay)
+    momentum_1 = df['price'].pct_change(1)
+    momentum_5 = df['price'].pct_change(5)
+    momentum_20 = df['price'].pct_change(20)
+    df['momentum_decay'] = momentum_1 / (momentum_5 + 1e-6) - momentum_5 / (momentum_20 + 1e-6)
+    
+    # 12. 订单到达率因子 (Order Arrival Rate)
+    df['order_arrival_rate'] = 1 / (df['time_interval'] + 1e-6)
+    df['arrival_rate_volatility'] = df['order_arrival_rate'].rolling(window).std()
+    df['arrival_rate_trend'] = df['order_arrival_rate'].rolling(window).apply(
+        lambda x: stats.linregress(range(len(x)), x)[0] if len(x) > 2 else 0
+    )
+
+    # # 13. 价格-数量相关性 (Price-Volume Correlation)
+    # df['price_volume_corr'] = df['price'].rolling(window).corr(df['quantity'])
+    # df['price_volume_beta'] = df['price'].pct_change().rolling(window).cov(df['quantity'].pct_change()) / df['quantity'].pct_change().rolling(window).var()
+
+    # 14. 交易强度不对称 (Trading Intensity Asymmetry)
+    up_moves = (df['price'].diff() > 0).astype(int)
+    down_moves = (df['price'].diff() < 0).astype(int)
+
+    up_volume = (df['quantity'] * up_moves).rolling(window).sum()
+    down_volume = (df['quantity'] * down_moves).rolling(window).sum()
+    df['intensity_asymmetry'] = (up_volume - down_volume) / (up_volume + down_volume + 1e-6)
+    return df.replace([np.inf, -np.inf], np.nan).dropna()
+    # 15. 价格持续性因子 (Price Persistence)
+    same_direction = ((df['price'].diff() > 0) & (df['price'].diff().shift(1) > 0)) | \
+                    ((df['price'].diff() < 0) & (df['price'].diff().shift(1) < 0))
+    df['price_persistence'] = same_direction.astype(int).rolling(window).mean()
+    
+    return df.dropna()
+
+
+
+def train_model(model, train_loader, optimizer, num_epochs):
+    L1_mean = nn.L1Loss(reduction='mean')
+    # L2_mean = nn.MSELoss(reduction='mean')
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = []
+        epoch_accuracy=[]
+        for inputs, labels in tqdm(train_loader):
+            with torch.autograd.detect_anomaly():
+              optimizer.zero_grad()
+              outputs = model(inputs)
+              loss = L1_mean(outputs.view(-1),labels)
+              accuracy =  loss
+              loss.backward()
+              optimizer.step()
+              epoch_loss.append(loss.item())
+              epoch_accuracy.append(accuracy.item())
+        # print(f'Epoch {epoch}, Accuracy {np.mean(epoch_accuracy)}, Loss: {np.mean(epoch_loss)}')
+        ##
+        model.eval()
+        test_loss=[]
+        test_accuracy=[]
+        with torch.no_grad():
+          for inputs, labels in tqdm(test_loader):
+            outputs = model(inputs)
+            loss = L1_mean(outputs, labels)
+            accuracy = loss
+            # loss.backward()
+            # optimizer.step()
+            test_loss.append(loss.item())
+            test_accuracy.append(accuracy.item())
+        test_loss = np.mean(test_loss)
+        test_accuracy = np.mean(test_accuracy)
+        print('epoch:% 5d, train_loss: %.4f, train_accuracy: %.5f, test_loss: %.5f,'
+          ' test_accuracy: %.5f,' % (epoch,
+                                    np.mean(epoch_loss),
+                                    np.mean(epoch_accuracy) * 100,
+                                    test_loss,
+                                    test_accuracy * 100))
+        
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': test_loss,
+            }, f'ckpts/{epoch}.pt')
+        
+###
+###原始交易数据 ──┬── 过去100ms特征 ──┐ │ ├─→ 合并为训练对 
+###未来BBO数据 ───┴── 20ms后价格 ─────┘        
+###
+def get_data(h, gamma, T, batch_size):
+  print("Training data:")
+  # 读取并预处理bbo数据
+  bbo_df = pd.concat([pd.read_csv(train_file_path, 
+                                usecols=['timestamp', 'ask_price', 'bid_price', 'ask_amount', 'bid_amount'], 
+                                engine='pyarrow') for train_file_path in bbo_path], 
+                    axis=0)
+  # 确保bbo数据按时间戳排序
+  bbo_df['timestamp'] = pd.to_datetime(bbo_df['timestamp'], unit='us')
+  bbo_df = bbo_df.sort_values('timestamp')
+
+  # 读取并预处理trades数据
+  trades = pd.concat([pd.read_csv(train_file_path, engine='pyarrow') for train_file_path in agg_path], axis=0)
+  trades['date'] = pd.to_datetime(trades['transact_time'], unit='ms').astype('datetime64[ns]')
+  trades.index = trades['date']
+
+
+
+  trades.loc[:,'is_buy'] = 0
+  trades['is_buy'][trades['is_buyer_maker']==False]=1
+  trades.loc[:,'is_sell'] = 0
+  trades['is_sell'][trades['is_buyer_maker']==True]=1
+
+  # 分离买卖交易
+  buy_trades = trades[trades['is_buyer_maker']==False].copy()
+  sell_trades = trades[trades['is_buyer_maker']==True].copy()
+
+  # 聚合交易数据
+  buy_trades = buy_trades.groupby('transact_time').agg({
+      'agg_trade_id': 'last',
+      'price': 'last',
+      'quantity': 'sum',
+      'first_trade_id': 'first',
+      'last_trade_id': 'last',
+      'is_buy': 'last',
+      'is_sell': 'last',
+      'date': 'last',
+      # 'transact_time':'last'
+  }).reset_index()
+
+  sell_trades = sell_trades.groupby('transact_time').agg({
+      'agg_trade_id': 'last',
+      'price': 'last',
+      'quantity': 'sum',
+      'first_trade_id': 'first',
+      'last_trade_id': 'last',
+      'is_buy': 'last',
+      'is_sell': 'last',
+      'date': 'last',
+      # 'transact_time':'last'
+  }).reset_index()
+
+  # 计算交易间隔
+  buy_trades['time_interval'] = buy_trades['transact_time'] - buy_trades['transact_time'].shift()
+  sell_trades['time_interval'] = sell_trades['transact_time'] - sell_trades['transact_time'].shift()
+
+
+  # 合并对齐后的买卖交易数据
+  trades = pd.concat([buy_trades, sell_trades])
+  trades = trades.sort_values('transact_time')
+
+  print(f'aligned_trades: {trades.columns}')
+  aligned_trades = pd.merge_asof(
+      trades,
+      bbo_df,
+      left_on='date',
+      right_on='timestamp',
+      direction='forward',  # 使用之后最近的bbo数据
+      suffixes=('_trade', '_bbo')
+  )
+
+  #add future mid_price with 20 mileseconds
+  bbo_df['mid_price']=(bbo_df['bid_price']+bbo_df['ask_price'])/2
+  aligned_trades['target_time'] = aligned_trades['date'] + pd.Timedelta(f'{20}ms')
+
+  # Perform an asof merge to get the last price and amount at time timestamp + latency for each timestamp, direction backward to trade at the current market state after latency
+  aligned_trades = pd.merge_asof(aligned_trades, bbo_df[['mid_price','timestamp']], left_on='target_time', right_on='timestamp', suffixes=('', '_future'), direction="nearest")
+
+  # 将交易时间转换为datetime
+  aligned_trades['transact_time'] = pd.to_datetime(aligned_trades['transact_time'], unit='ms')
+  aligned_trades = aligned_trades.sort_values('transact_time')
+
+
+  target=aligned_trades[['transact_time', 'mid_price']]
+
+
+  # aligned_trades = compute_fea(aligned_trades, h)
+
+  # input_features = aligned_trades['transact_time'].apply( lambda x: get_past_trades_features(x, aligned_trades) )
+
+  input_features=aligned_trades[['transact_time', 'price', 'quantity', 'is_buy', 'is_sell', 'date', 'time_interval']]
+  training_data=pd.merge(input_features, target[['transact_time', 'mid_price']], on='transact_time', how='inner').dropna()
+  # training_data = compute_fea(training_data, h)
+
+  training_data=calculate_advanced_factors(training_data)
+  training_data=training_data.reset_index()
+
+  ss=len(training_data)
+
+  train_dataset = CustomDataset(training_data.values[:-30000, 8:], training_data['mid_price'].values[:-30000] )
+
+  print("Test data:")
+  test_dataset = CustomDataset(training_data.values[-30000:, 8:], training_data['mid_price'].values[-30000:])
+
+  # assert 'Cuda' in str(train_ds['book'].devices())
+
+  print("Training on shape", len(train_dataset))
+  print("Testing on shape", len(test_dataset))
+
+  train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+  test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True)
+
+  return train_loader, test_loader
+
+class CustomDataset(Dataset):
+    def __init__(self, data, labels):
+        """
+        Args:
+            data (np.array): Data processed by `process_data` to be NxWxH dimensions.
+            labels (np.array): Corresponding labels of the data.
+        """
+        # Assuming data and labels are numpy arrays
+        # Convert numpy arrays to torch tensors
+        self.data = torch.tensor(data.astype(np.float32), dtype=torch.float32).cuda()
+        self.labels = torch.tensor(labels.astype(np.float32), dtype=torch.float32).cuda()
+        # self.data=torch.tensor(data, dtype=torch.float32).cuda()
+
+    def __len__(self):
+        """Return the total number of data samples."""
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        """Generate one sample of data."""
+        return self.data[idx], self.labels[idx]
+
+##predict
+def evaluate(model, T, test_df, test_batch_size):
+    with torch.no_grad():
+      # preds = pd.DataFrame(index=test_df.index, columns=['returns'])
+      # sliding_view = torch.from_numpy(np.lib.stride_tricks.sliding_window_view(test_df.values, (T, test_df.shape[1])).reshape(-1, T, test_df.shape[1]))
+      preds=torch.zeros((test_df.shape[0]), dtype=torch.float).cuda()
+      # sliding_view = sliding_view).cuda()
+      for k in range(0, test_df.shape[0], test_batch_size):
+          test_batch = test_df[k: k+test_batch_size, :]
+          returns = model(test_batch)
+          preds[k: k+test_batch_size] = returns.view(-1).detach()
+      return preds
+
+
+
+def calculate_performance_metrics(y_true, y_pred):
+    """
+    计算预测收益率与实际收益率的IC和RankIC
+    
+    参数:
+        y_true: 实际收益率数组
+        y_pred: 预测收益率数组
+        
+    返回:
+        dict: 包含各项评估指标
+    """
+    # 确保输入为numpy数组并去除NaN
+    y_true = np.asarray(y_true.cpu())
+    y_pred = np.asarray(y_pred.cpu())
+    mask = ~np.isnan(y_true) & ~np.isnan(y_pred)
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    
+    if len(y_true) == 0:
+        raise ValueError("去除NaN后没有有效数据")
+    
+    # 计算IC（Pearson相关系数）
+    ic, ic_pvalue = pearsonr(y_pred, y_true)
+    
+    # 计算RankIC（Spearman相关系数）
+    rankic, rankic_pvalue = spearmanr(y_pred, y_true)
+    
+    # 计算IR（信息比率）
+    ir = ic / np.std(y_pred)
+    
+    # 计算预测方向准确性
+    direction_accuracy = np.mean(np.sign(y_pred) == np.sign(y_true))
+    
+    return {
+        'IC': ic,
+        'IC_pvalue': ic_pvalue,
+        'RankIC': rankic,
+        'RankIC_pvalue': rankic_pvalue,
+        'IR': ir,
+        'Direction_Accuracy': direction_accuracy,
+        'N': len(y_true)
+    }
+
+
+h = 20
+gamma = 0.0005
+T = 100
+num_epochs = 15
+learning_rate = 0.005
+batch_size = 1024
+
+
+train_loader, test_loader = get_data(h, gamma, T, batch_size )
+
+model = CNN(train_loader.dataset.data.shape[-1]).cuda()
+
+
+model = LightweightGRU(input_size=train_loader.dataset.data.shape[-1]).cuda()
+
+optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+train_model(model, train_loader, optimizer, num_epochs=num_epochs)
+
+test_df=test_loader.dataset.data
+test_labels=test_loader.dataset.labels
+
+
+test_batch_size = 2048*4
+
+preds = evaluate(model, T, test_df, test_batch_size)
+# 
+print("eval done\n")
+
+# 计算评估指标
+metrics = calculate_performance_metrics(test_labels, preds)
+print(metrics)
+
+exit()
